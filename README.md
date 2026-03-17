@@ -1,6 +1,6 @@
 # The Traitors
 
-[![⭐ OpenReward Environment](https://img.shields.io/badge/%E2%AD%90%20OpenReward-Environment-f7e6cc)](https://openreward.ai/EnvCommons/thetraitors)
+[![⭐ OpenReward Environment](https://img.shields.io/badge/%E2%AD%90%20OpenReward-Environment-f7e6cc)](https://openreward.ai/RJT1990/TheTraitors)
 
 ## Description
 
