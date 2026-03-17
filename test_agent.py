@@ -15,7 +15,7 @@ import os
 from openai import AsyncOpenAI
 from openreward import AsyncOpenReward
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-5.2")
+MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-5.4")
 OPENAI_API_KEY = os.environ["OPENAI_API_KEY"]
 ENV_NAME = "local/TheTraitors"
 SPLIT = "train"
@@ -34,7 +34,7 @@ async def main() -> None:
     print(f"Found {len(tasks)} tasks")
     print(f"Tools ({len(tools)}): {tools[0] if tools else 'none'}")
 
-    task = tasks[0]
+    task = tasks[2]
     print(f"\nRunning task: {task.task_spec}")
 
     await run_task(or_client, environment, oai_client, task, tools)
@@ -122,16 +122,29 @@ async def run_task(or_client, environment, oai_client, task, tools) -> None:
                     if finished:
                         print(f"\n{'='*60}")
                         print("GAME FINISHED!")
-                        print(f"Final reward: {total_reward:.3f}")
+                        print(f"\n{result_text}")
+                        print(f"\nFinal reward: {total_reward:.3f}")
                         print(f"{'='*60}")
+
+                        # Send final tool result to model so OpenReward
+                        # rollout chain ends with a model response
+                        final_response = await oai_client.responses.create(
+                            model=MODEL_NAME,
+                            tools=tools,
+                            input=input_list,
+                        )
+                        rollout.log_openai_response(
+                            final_response.output[-1],
+                            is_finished=True,
+                        )
                         break
 
                 elif item.type == "text":
                     print(f"\nModel text: {item.text[:200]}...")
 
             if not tool_called:
-                print("\nNo tool call in response, ending task")
-                break
+                print("\nNo tool call in response, retrying")
+                continue
 
         print(f"\nTask completed in {turn} turns")
 

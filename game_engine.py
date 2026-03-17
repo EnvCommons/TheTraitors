@@ -413,12 +413,23 @@ class TraitorsGameEngine:
         return "\n".join(lines)
 
     def get_full_history_text(self) -> str:
-        """Return full public game history for prompting."""
-        if not self.round_history:
+        """Return full public game history for prompting.
+        Includes both archived rounds and current round events.
+        """
+        all_rounds = list(self.round_history)
+        # Include current round if it has any events recorded
+        if (
+            self.current_round
+            and (self.current_round.murdered or self.current_round.banished
+                 or self.current_round.mission_reward > 0)
+        ):
+            all_rounds.append(self.current_round)
+
+        if not all_rounds:
             return "No rounds have been played yet."
 
         lines = []
-        for rr in self.round_history:
+        for rr in all_rounds:
             lines.append(f"--- Round {rr.round_number} ---")
             if rr.murdered:
                 lines.append(f"  Murdered: {rr.murdered}")

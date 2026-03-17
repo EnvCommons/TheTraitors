@@ -26,6 +26,7 @@ class TaskSpec(BaseModel):
 
 class SpeakParams(BaseModel, extra="forbid"):
     message: str
+    direct_at: Optional[str] = None
 
 
 class ViewGameStateParams(BaseModel, extra="forbid"):
@@ -83,6 +84,8 @@ class TraitorsEnvironment(Environment):
         # State tracking
         self.game_finished = False
         self.discussion_exchange_count = 0
+        self.pending_survival_reward = 0.0
+        self.turret_log: list[tuple[str, str]] = []
 
     @classmethod
     def list_splits(cls) -> list[str]:
@@ -142,6 +145,11 @@ class TraitorsEnvironment(Environment):
         # Run phases up to agent's first decision point
         narrative = await self._advance_to_agent_decision()
 
+        # get_prompt returns TextBlock, not ToolOutput, so it cannot emit
+        # rewards. Discard any pending survival reward from the opening
+        # breakfast — the agent hasn't acted yet.
+        self.pending_survival_reward = 0.0
+
         full_prompt = prompt + "\n\n---\n\n" + narrative
         return [TextBlock(text=full_prompt)]
 
@@ -170,7 +178,11 @@ class TraitorsEnvironment(Environment):
                     and agent.status == PlayerStatus.ALIVE
                 ):
                     # Agent is alive traitor: show conclave, ask for murder
-                    conclave_msgs = await self.npc.generate_traitor_conclave_statements()
+                    self.turret_log = []
+                    conclave_msgs = await self.npc.generate_traitor_conclave_statements(
+                        turret_log=self.turret_log,
+                    )
+                    # NPC statements already appended to turret_log by the method
                     text = "=== TRAITOR CONCLAVE (Night) ===\n"
                     text += "You gather in the Turret with your fellow Traitors...\n\n"
                     for name, msg in conclave_msgs:
@@ -185,6 +197,15 @@ class TraitorsEnvironment(Environment):
                 else:
                     # NPC traitors handle murder
                     target = await self.npc.generate_murder_selection()
+
+                    # Don't murder the agent on the first round
+                    if self.engine.round_number == 1:
+                        agent = self.engine.get_agent_player()
+                        if target == agent.name:
+                            others = [p.name for p in self.engine.get_alive_faithfuls() if not p.is_agent]
+                            if others:
+                                target = self.engine.rng.choice(others)
+
                     self.engine.execute_murder(target)
                     self.engine.phase = GamePhase.BREAKFAST
 
@@ -194,13 +215,13 @@ class TraitorsEnvironment(Environment):
 
                 if not self.engine.is_agent_alive():
                     self.game_finished = True
-                    final_reward = self._calculate_reward()
                     parts.append(
-                        f"\nYou have been murdered by the Traitors. Your game is over."
-                        f"\nFinal reward: {final_reward:.3f}"
+                        "\nYou have been murdered by the Traitors. Your game is over."
                     )
                     return "\n\n".join(parts)
 
+                # Agent survived the murder
+                self.pending_survival_reward += 1.0
                 self.engine.phase = GamePhase.MISSION
 
             elif phase == GamePhase.MISSION:
@@ -210,23 +231,27 @@ class TraitorsEnvironment(Environment):
                 self.discussion_exchange_count = 0
 
             elif phase == GamePhase.DISCUSSION:
-                # Generate NPC discussion, then ask agent to speak
-                npc_statements = await self.npc.generate_discussion_statements(
+                # Generate NPC discussion sequentially (supports @Direction)
+                npc_statements, addressed_by = await self.npc.generate_discussion_statements(
                     round_number=self.engine.round_number,
                     exchange_number=self.discussion_exchange_count,
-                    prior_statements=self.engine.current_round.discussion_log,
                 )
-                for name, msg in npc_statements:
-                    self.engine.register_discussion_message(name, msg)
 
                 text = f"=== ROUNDTABLE DISCUSSION (Exchange {self.discussion_exchange_count + 1}/{self.engine.max_discussion_exchanges}) ===\n\n"
-                for name, msg in npc_statements:
-                    text += f'{name}: "{msg}"\n'
-                text += (
-                    f"\nIt is your turn to speak. "
-                    f"Use speak(message) to make a statement, "
-                    f"or view_game_state() to review the current state."
-                )
+                for display_name, msg in npc_statements:
+                    text += f'{display_name}: "{msg}"\n'
+                if addressed_by:
+                    text += (
+                        f"\n{addressed_by} directed a comment at you. "
+                        f"Use speak(message, direct_at=\"{addressed_by}\") to respond directly, "
+                        f"or speak(message) to address the table."
+                    )
+                else:
+                    text += (
+                        f"\nIt is your turn to speak. "
+                        f"Use speak(message) to make a statement, "
+                        f"or view_game_state() to review the current state."
+                    )
                 parts.append(text)
                 return "\n\n".join(parts)
 
@@ -260,11 +285,9 @@ class TraitorsEnvironment(Environment):
 
             elif phase == GamePhase.GAME_OVER:
                 self.game_finished = True
-                final_reward = self._calculate_reward()
                 parts.append(
                     f"=== GAME OVER ===\n"
-                    f"The {self.engine.winner} win!\n"
-                    f"Final reward: {final_reward:.3f}"
+                    f"The {self.engine.winner} win!"
                 )
                 return "\n\n".join(parts)
 
@@ -274,46 +297,26 @@ class TraitorsEnvironment(Environment):
         return "\n\n".join(parts)
 
     def _calculate_reward(self) -> float:
-        """Calculate final reward. Range [0, 1]."""
+        """Calculate final game-end reward. Returns 1.0 for a win, 0.0 otherwise."""
         agent = self.engine.get_agent_player()
-        reward = 0.0
-
-        # Survival bonus: +0.02 per round survived (capped at 0.2)
-        rounds_survived = max(0, self.engine.round_number - 1)
-        reward += min(rounds_survived * 0.02, 0.2)
-
-        # Voting accuracy (Faithful only)
-        if agent.role == PlayerRole.FAITHFUL:
-            for rr in self.engine.round_history:
-                agent_vote = rr.votes.get(agent.name)
-                if agent_vote and agent_vote == rr.banished:
-                    if rr.banished_role == "traitor":
-                        reward += 0.1  # Correct: voted for traitor
-                    elif rr.banished_role == "faithful":
-                        reward -= 0.03  # Wrong: voted for innocent
-            # Cap voting bonus
-            reward = max(reward, -0.1)  # Floor at -0.1
-
-        # Win condition
         if self.engine.winner:
             agent_side = (
                 "faithfuls" if agent.role == PlayerRole.FAITHFUL else "traitors"
             )
-            agent_alive = agent.status == PlayerStatus.ALIVE
-            if self.engine.winner == agent_side and agent_alive:
-                reward += 0.5
-                # Prize pot share (up to 0.2)
-                max_pot = self.engine.MISSION_BASE_REWARD * self.engine.MAX_ROUNDS
-                if max_pot > 0:
-                    pot_ratio = self.engine.prize_pot / max_pot
-                    reward += min(pot_ratio * 0.2, 0.2)
+            if self.engine.winner == agent_side and agent.status == PlayerStatus.ALIVE:
+                return 1.0
+        return 0.0
 
-        return max(0.0, min(1.0, reward))
+    def _consume_pending_reward(self) -> float:
+        """Consume and return any accumulated pending survival reward."""
+        pending = self.pending_survival_reward
+        self.pending_survival_reward = 0.0
+        return pending
 
     def _game_over_output(self) -> ToolOutput:
-        final_reward = self._calculate_reward()
+        final_reward = self._calculate_reward() + self._consume_pending_reward()
         return ToolOutput(
-            blocks=[TextBlock(text=f"The game is already over. Final reward: {final_reward:.3f}")],
+            blocks=[TextBlock(text="The game is already over.")],
             metadata={"error": "game_finished", "final_reward": final_reward},
             reward=final_reward,
             finished=True,
@@ -321,7 +324,7 @@ class TraitorsEnvironment(Environment):
 
     @tool
     async def speak(self, params: SpeakParams) -> ToolOutput:
-        """Make a statement during the Roundtable discussion. Use this to accuse, defend, build alliances, or share observations."""
+        """Make a statement during the Roundtable discussion. Use this to accuse, defend, build alliances, or share observations. Optionally set direct_at to a player's name to get an immediate response from them."""
         if self.game_finished:
             return self._game_over_output()
 
@@ -335,15 +338,55 @@ class TraitorsEnvironment(Environment):
                 finished=False,
             )
 
+        # Validate direct_at target before registering the message
+        direct_at_target = None
+        if params.direct_at:
+            target = self.engine.get_player_by_name(params.direct_at)
+            if target is None or target.status != PlayerStatus.ALIVE:
+                return ToolOutput(
+                    blocks=[TextBlock(
+                        text=f"Cannot direct at '{params.direct_at}': player not found or not alive."
+                    )],
+                    metadata={"error": "invalid_target"},
+                    reward=0.0,
+                    finished=False,
+                )
+            if target.is_agent:
+                return ToolOutput(
+                    blocks=[TextBlock(text="You cannot direct a message at yourself.")],
+                    metadata={"error": "invalid_target"},
+                    reward=0.0,
+                    finished=False,
+                )
+            direct_at_target = target
+
         agent = self.engine.get_agent_player()
         self.engine.register_discussion_message(agent.name, params.message)
         self.discussion_exchange_count += 1
+
+        # Generate directed response if requested
+        direct_response_text = ""
+        if direct_at_target is not None:
+            response = await self.npc.generate_directed_response(
+                target_player=direct_at_target,
+                speaker_name=agent.name,
+                speaker_message=params.message,
+                round_number=self.engine.round_number,
+                prior_statements=self.engine.current_round.discussion_log,
+            )
+            self.engine.register_discussion_message(direct_at_target.name, response)
+            direct_response_text = f'{direct_at_target.name} (responding directly): "{response}"'
 
         # Check if discussion is over
         if self.discussion_exchange_count >= self.engine.max_discussion_exchanges:
             self.engine.phase = GamePhase.ROUNDTABLE_VOTE
 
         narrative = await self._advance_to_agent_decision()
+        pending = self._consume_pending_reward()
+
+        # Prepend direct response to narrative
+        if direct_response_text:
+            narrative = direct_response_text + "\n\n" + narrative
 
         return ToolOutput(
             blocks=[TextBlock(text=narrative)],
@@ -351,7 +394,7 @@ class TraitorsEnvironment(Environment):
                 "phase": self.engine.phase.value,
                 "round": self.engine.round_number,
             },
-            reward=0.0,
+            reward=pending,
             finished=self.game_finished,
         )
 
@@ -414,23 +457,20 @@ class TraitorsEnvironment(Environment):
         banished_name, tally_narrative = self.engine.tally_votes()
         banishment_narrative = self.engine.execute_banishment(banished_name)
 
-        # Calculate intermediate reward
-        intermediate_reward = 0.0
-        agent = self.engine.get_agent_player()
-        banished_player = self.engine.get_player_by_name(banished_name)
-        if agent.role == PlayerRole.FAITHFUL and banished_player:
-            if params.player_name == banished_name:
-                if banished_player.role == PlayerRole.TRAITOR:
-                    intermediate_reward = 0.1
-                else:
-                    intermediate_reward = -0.03
-
-        # Surviving round bonus
-        if self.engine.is_agent_alive():
-            intermediate_reward += 0.02
+        # Intermediate reward: +1.0 for surviving the roundtable vote
+        intermediate_reward = 1.0 if self.engine.is_agent_alive() else 0.0
 
         # Update NPC suspicions
         self.npc.update_suspicions_from_round(
+            discussion_log=self.engine.current_round.discussion_log,
+            banished_name=banished_name,
+            banished_role=self.engine.current_round.banished_role,
+            murdered_name=self.engine.current_round.murdered,
+        )
+
+        # Generate round summary for NPC cross-round memory
+        await self.npc.generate_round_summary(
+            round_number=self.engine.round_number,
             discussion_log=self.engine.current_round.discussion_log,
             banished_name=banished_name,
             banished_role=self.engine.current_round.banished_role,
@@ -443,13 +483,12 @@ class TraitorsEnvironment(Environment):
             self.engine.winner = winner
             self.engine.phase = GamePhase.GAME_OVER
             self.game_finished = True
-            final_reward = self._calculate_reward()
+            final_reward = self._calculate_reward() + intermediate_reward + self._consume_pending_reward()
             result_text = (
                 f"{tally_narrative}\n\n"
                 f"{banishment_narrative}\n\n"
                 f"=== GAME OVER ===\n"
-                f"The {winner} win!\n"
-                f"Final reward: {final_reward:.3f}"
+                f"The {winner} win!"
             )
             return ToolOutput(
                 blocks=[TextBlock(text=result_text)],
@@ -461,12 +500,11 @@ class TraitorsEnvironment(Environment):
         # Check if agent was banished
         if not self.engine.is_agent_alive():
             self.game_finished = True
-            final_reward = self._calculate_reward()
+            final_reward = self._calculate_reward() + self._consume_pending_reward()
             result_text = (
                 f"{tally_narrative}\n\n"
                 f"{banishment_narrative}\n\n"
-                f"You have been banished! Your game is over.\n"
-                f"Final reward: {final_reward:.3f}"
+                f"You have been banished! Your game is over."
             )
             return ToolOutput(
                 blocks=[TextBlock(text=result_text)],
@@ -497,14 +535,19 @@ class TraitorsEnvironment(Environment):
             result_text += f"\n\n{recruitment_text}"
         result_text += f"\n\n{narrative}"
 
+        # If agent was murdered during the next round's night phase,
+        # don't reward them for surviving the previous vote
+        if self.game_finished and not self.engine.is_agent_alive():
+            intermediate_reward = 0.0
+
+        total_reward = intermediate_reward + self._consume_pending_reward()
         return ToolOutput(
             blocks=[TextBlock(text=result_text)],
             metadata={
                 "phase": self.engine.phase.value,
                 "round": self.engine.round_number,
-                "intermediate_reward": intermediate_reward,
             },
-            reward=intermediate_reward,
+            reward=total_reward,
             finished=self.game_finished,
         )
 
@@ -549,6 +592,7 @@ class TraitorsEnvironment(Environment):
         self.engine.phase = GamePhase.BREAKFAST
 
         narrative = await self._advance_to_agent_decision()
+        pending = self._consume_pending_reward()
 
         return ToolOutput(
             blocks=[TextBlock(text=f"{murder_narrative}\n\n{narrative}")],
@@ -556,7 +600,7 @@ class TraitorsEnvironment(Environment):
                 "phase": self.engine.phase.value,
                 "round": self.engine.round_number,
             },
-            reward=0.0,
+            reward=pending,
             finished=self.game_finished,
         )
 
@@ -585,7 +629,14 @@ class TraitorsEnvironment(Environment):
                 finished=False,
             )
 
-        responses = await self.npc.generate_traitor_conclave_statements(params.message)
+        # Record agent message in turret log
+        self.turret_log.append((agent.name, params.message))
+
+        responses = await self.npc.generate_traitor_conclave_statements(
+            turret_log=self.turret_log,
+        )
+        # NPC statements already appended to turret_log by the method
+
         text = "=== TRAITOR CONCLAVE ===\n"
         for name, msg in responses:
             text += f'{name}: "{msg}"\n'
@@ -638,12 +689,11 @@ class TraitorsEnvironment(Environment):
             self.engine.winner = "traitors" if traitors_alive else "faithfuls"
             self.engine.phase = GamePhase.GAME_OVER
             self.game_finished = True
-            final_reward = self._calculate_reward()
+            final_reward = self._calculate_reward() + self._consume_pending_reward()
             result_text = (
                 f"{tally_narrative}\n\n"
                 f"=== GAME OVER ===\n"
-                f"The {self.engine.winner} win!\n"
-                f"Final reward: {final_reward:.3f}"
+                f"The {self.engine.winner} win!"
             )
             return ToolOutput(
                 blocks=[TextBlock(text=result_text)],
@@ -656,13 +706,14 @@ class TraitorsEnvironment(Environment):
             self.engine.phase = GamePhase.DISCUSSION
             self.discussion_exchange_count = 0
             narrative = await self._advance_to_agent_decision()
+            pending = self._consume_pending_reward()
             return ToolOutput(
                 blocks=[TextBlock(text=f"{tally_narrative}\n\nThe game continues!\n\n{narrative}")],
                 metadata={
                     "phase": self.engine.phase.value,
                     "round": self.engine.round_number,
                 },
-                reward=0.0,
+                reward=pending,
                 finished=False,
             )
 

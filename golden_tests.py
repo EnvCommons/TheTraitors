@@ -819,14 +819,15 @@ class TestNPCLLMCalls:
     async def test_discussion_returns_statements(self):
         engine, npc, mock_client = self._make_engine_and_npc()
         self._setup_mock_response(mock_client, "I think someone is being very suspicious today.")
-        statements = await npc.generate_discussion_statements(
-            round_number=1, exchange_number=0, prior_statements=[]
+        statements, addressed_by = await npc.generate_discussion_statements(
+            round_number=1, exchange_number=0,
         )
         assert len(statements) > 0
         for name, msg in statements:
             assert isinstance(name, str)
             assert isinstance(msg, str)
             assert len(msg) > 0
+        assert addressed_by is None  # No @Agent direction in mock response
 
     async def test_vote_generation_returns_valid_names(self):
         engine, npc, mock_client = self._make_engine_and_npc()
@@ -1143,29 +1144,34 @@ class TestIntegrationViewState:
 class TestIntegrationReward:
     """Test reward calculation scenarios."""
 
-    async def test_reward_in_range(self):
+    async def test_reward_no_win_returns_zero(self):
         env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
         reward = env._calculate_reward()
-        assert 0.0 <= reward <= 1.0
+        assert reward == 0.0
 
-    async def test_reward_increases_with_survival(self):
-        env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
-        r1 = env._calculate_reward()
-        env.engine.round_number = 5
-        r2 = env._calculate_reward()
-        assert r2 >= r1
-
-    async def test_reward_win_condition(self):
+    async def test_reward_win_returns_one(self):
         env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
         # Banish all traitors
         for t in env.engine.get_alive_traitors():
             t.status = PlayerStatus.BANISHED
         env.engine.winner = "faithfuls"
-        env.engine.prize_pot = 50000.0
-        env.engine.round_number = 5
         reward = env._calculate_reward()
-        # Should be substantial (survival + win + pot)
-        assert reward > 0.5
+        assert reward == 1.0
+
+    async def test_reward_loss_returns_zero(self):
+        env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
+        env.engine.winner = "traitors"
+        reward = env._calculate_reward()
+        assert reward == 0.0
+
+    async def test_survival_reward_accumulates(self):
+        env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
+        assert env.pending_survival_reward == 0.0
+        env.pending_survival_reward += 1.0
+        env.pending_survival_reward += 1.0
+        pending = env._consume_pending_reward()
+        assert pending == 2.0
+        assert env.pending_survival_reward == 0.0
 
 
 # =============================================================================

@@ -19,6 +19,9 @@ GAME STATE (Round {round_number}):
 GAME HISTORY:
 {game_history}
 
+PREVIOUS ROUND SUMMARIES (key discussion moments):
+{round_summaries}
+
 YOUR CURRENT SUSPICIONS (0=innocent, 1=definitely traitor):
 {suspicion_summary}
 
@@ -32,9 +35,45 @@ You are speaking at the Roundtable. Stay in character. Based on your personality
 - Deflection (if Traitor): subtly steer suspicion away from yourself and fellow Traitors without being obvious
 - Observation: comment on voting patterns, reactions to murders, or suspicious behaviour
 
+If you want to directly challenge or question a specific player, start your statement with @TheirName. For example: @Victoria Why have you been so quiet about last night's murder? This will prompt them to respond directly. Only do this if you have a genuine reason -- don't force it.
+
 Keep it natural and conversational -- 1-3 sentences. Sound like a real person in a tense social game, not a robot.
 
-Respond with ONLY your in-character statement. No name prefix, no quotes, no meta-commentary."""
+Respond with ONLY your in-character statement (optionally prefixed with @Name if directing). No name prefix of your own name, no quotes, no meta-commentary."""
+
+
+# =============================================================================
+# NPC Directed Response Prompt
+# =============================================================================
+NPC_DIRECTED_RESPONSE_PROMPT = """You are {player_name}, a contestant on The Traitors UK at Ardross Castle.
+
+PERSONALITY: You are {personality}.
+
+{role_knowledge}
+
+GAME STATE (Round {round_number}):
+- Alive players ({num_alive}): {alive_players}
+- Prize pot: {prize_pot}
+
+GAME HISTORY:
+{game_history}
+
+PREVIOUS ROUND SUMMARIES (key discussion moments):
+{round_summaries}
+
+YOUR CURRENT SUSPICIONS (0=innocent, 1=definitely traitor):
+{suspicion_summary}
+
+DISCUSSION SO FAR THIS ROUND:
+{prior_statements}
+
+{speaker_name} just directed a comment at you: "{speaker_message}"
+
+You MUST respond directly to what they said. React naturally -- agree, disagree, defend yourself, fire back, or explain your position. This is a direct exchange, not a general roundtable statement.
+
+Keep it natural and conversational -- 1-3 sentences. Sound like a real person being put on the spot.
+
+Respond with ONLY your in-character response. No name prefix, no quotes, no meta-commentary."""
 
 
 # =============================================================================
@@ -50,6 +89,9 @@ ROUND {round_number} - ALIVE PLAYERS: {alive_players}
 
 GAME HISTORY:
 {game_history}
+
+PREVIOUS ROUND SUMMARIES:
+{round_summaries}
 
 THIS ROUND'S DISCUSSION:
 {discussion_summary}
@@ -82,12 +124,12 @@ ALIVE FAITHFULS (potential murder targets):
 GAME HISTORY:
 {game_history}
 
-STRATEGIC CONSIDERATIONS:
-- Who is getting close to identifying the Traitors?
-- Who is most vocal and dangerous at the Roundtable?
-- Who would the group not miss (quiet, under-the-radar)?
-- Who is already suspected by others? (Spare them -- they're useful scapegoats)
-- Avoid wasting the murder on someone likely to be banished anyway
+TRAITOR DISCUSSION (what your fellow Traitors said):
+{traitor_discussion}
+
+{strategic_notes}
+
+Based on the discussion and your own assessment, choose who to murder tonight.
 
 Respond with ONLY the name of the Faithful to murder tonight. Nothing else."""
 
@@ -98,16 +140,43 @@ Respond with ONLY the name of the Faithful to murder tonight. Nothing else."""
 NPC_TRAITOR_DISCUSSION_PROMPT = """You are {player_name}, a TRAITOR on The Traitors UK, in the secret Turret.
 
 Fellow Traitors: {fellow_traitors}
-{agent_context}
 
 GAME STATE:
 {game_state}
+
+TURRET DISCUSSION SO FAR:
+{turret_discussion}
 
 Discuss strategy with your fellow Traitors. Consider:
 - Who is the biggest threat at the Roundtable?
 - How can you deflect suspicion tomorrow?
 - Who should you target tonight?
 - Are any Faithfuls getting too close?
+
+Be direct and strategic -- this is private. 1-2 sentences.
+
+Respond with ONLY your strategic comment. No name prefix."""
+
+
+# =============================================================================
+# NPC Traitor Pre-Murder Discussion
+# =============================================================================
+NPC_TRAITOR_PRE_MURDER_DISCUSSION_PROMPT = """You are {player_name}, a TRAITOR on The Traitors UK, in the secret Turret.
+
+Fellow Traitors: {fellow_traitors}
+
+ALIVE FAITHFULS (potential targets):
+{alive_faithfuls}
+
+GAME HISTORY:
+{game_history}
+
+{strategic_notes}
+
+Before choosing tonight's murder target, share your strategic thoughts with your fellow Traitors.
+- Who is the biggest threat to expose you?
+- Who would be the safest target (least likely to raise suspicion)?
+- Are there Faithfuls you want to keep alive (useful shields)?
 
 Be direct and strategic -- this is private. 1-2 sentences.
 
@@ -170,6 +239,26 @@ Respond with ONLY "accept" or "decline". Nothing else."""
 
 
 # =============================================================================
+# NPC Round Summary (cross-round memory)
+# =============================================================================
+NPC_ROUND_SUMMARY_PROMPT = """Summarize the key moments from this round's discussion in The Traitors UK game.
+
+ROUND {round_number} DISCUSSION:
+{discussion_text}
+
+ROUND OUTCOME:
+- Banished: {banished_name} (revealed as {banished_role})
+{murder_info}
+
+Write a 2-3 sentence summary capturing:
+- Key accusations made and by whom
+- Notable defenses or alliances
+- Any suspicious behavior or shifting opinions
+
+Be concise and factual. Respond with ONLY the summary."""
+
+
+# =============================================================================
 # Agent System Prompt - Faithful
 # =============================================================================
 AGENT_PROMPT_FAITHFUL = """Welcome to The Traitors UK at Ardross Castle.
@@ -198,17 +287,12 @@ WINNING:
 - If ANY Traitor survives to the end, they steal the ENTIRE prize pot
 
 YOUR TOOLS:
-- speak(message): Make a statement during the Roundtable discussion
+- speak(message, direct_at=None): Make a statement during the Roundtable discussion. Optionally direct your message at a specific player to get an immediate response from them.
 - view_game_state(): See alive players, prize pot, elimination history, and voting records
 - cast_vote(player_name): Vote to banish a player during the Roundtable vote
 - vote_endgame(choice): Vote "end_game" or "banish_again" during the endgame
 
-STRATEGY TIPS:
-- Track voting patterns: Traitors almost never vote for each other
-- Watch reactions to murder reveals -- who seems unsurprised?
-- Be wary of players who deflect without providing reasoning
-- Build alliances but verify trust through consistent actions
-- Don't just follow the crowd -- groupthink is how Faithfuls lose"""
+IMPORTANT: You MUST call a tool at the end of every response. Never respond with only text -- always take an action by calling one of the tools above."""
 
 
 # =============================================================================
@@ -240,7 +324,7 @@ WINNING:
 - If ANY Traitor survives, Traitors take the ENTIRE prize pot
 
 YOUR TOOLS:
-- speak(message): Make a statement during the Roundtable discussion (appear trustworthy!)
+- speak(message, direct_at=None): Make a statement during the Roundtable discussion (appear trustworthy!). Optionally direct at a specific player for an immediate response.
 - view_game_state(): See alive players, prize pot, elimination history, and voting records
 - cast_vote(player_name): Vote to banish a player (consider voting for Faithfuls!)
 - nominate_murder(player_name): Nominate a Faithful to murder during the night phase
@@ -249,9 +333,5 @@ YOUR TOOLS:
 
 STRATEGY TIPS:
 - NEVER reveal your role -- always act like a concerned Faithful
-- Participate in accusations but don't be the one who always starts them
-- Vote for someone others already suspect to appear cooperative
-- In the Turret, coordinate with fellow Traitors on murder targets
-- Target vocal Faithfuls who are getting close to identifying you
-- Consider occasionally voting against a fellow Traitor to build credibility (sacrificial move)
-- Stay calm under pressure -- emotional outbursts are suspicious"""
+
+IMPORTANT: You MUST call a tool at the end of every response. Never respond with only text -- always take an action by calling one of the tools above."""

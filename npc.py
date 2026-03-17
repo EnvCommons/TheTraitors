@@ -15,11 +15,14 @@ from game_engine import (
 )
 from prompts import (
     NPC_DISCUSSION_PROMPT,
+    NPC_DIRECTED_RESPONSE_PROMPT,
     NPC_VOTE_PROMPT,
     NPC_MURDER_PROMPT,
     NPC_TRAITOR_DISCUSSION_PROMPT,
+    NPC_TRAITOR_PRE_MURDER_DISCUSSION_PROMPT,
     NPC_ENDGAME_VOTE_PROMPT,
     NPC_RECRUITMENT_DECISION_PROMPT,
+    NPC_ROUND_SUMMARY_PROMPT,
 )
 
 
@@ -48,6 +51,7 @@ class NPCController:
         self.engine = engine
         self.rng = rng
         self.memories: dict[str, NPCMemory] = {}
+        self.round_summaries: list[str] = []
 
     def initialize_memories(
         self, players: list[Player], personalities: dict[str, str]
@@ -108,6 +112,43 @@ class NPCController:
             lines.append(f'{speaker}: "{msg}"')
         return "\n".join(lines)
 
+    def _format_round_summaries(self) -> str:
+        """Format stored round summaries for inclusion in NPC prompts."""
+        if not self.round_summaries:
+            return "(No previous round summaries yet.)"
+        return "\n".join(self.round_summaries)
+
+    async def generate_round_summary(
+        self,
+        round_number: int,
+        discussion_log: list[tuple[str, str]],
+        banished_name: Optional[str],
+        banished_role: Optional[str],
+        murdered_name: Optional[str],
+    ) -> str:
+        """Generate a brief LLM summary of the round's discussion.
+        Returns the summary string and stores it internally.
+        """
+        discussion_text = "\n".join(
+            f'{speaker}: "{msg}"' for speaker, msg in discussion_log
+        )
+        murder_info = (
+            f"- Murdered last night: {murdered_name}"
+            if murdered_name
+            else "- No murder last night"
+        )
+
+        prompt = NPC_ROUND_SUMMARY_PROMPT.format(
+            round_number=round_number,
+            discussion_text=discussion_text,
+            banished_name=banished_name or "nobody",
+            banished_role=banished_role or "N/A",
+            murder_info=murder_info,
+        )
+        summary = await self._llm_call(prompt)
+        self.round_summaries.append(f"Round {round_number}: {summary}")
+        return summary
+
     def _select_speakers(
         self, exchange_number: int, num_speakers: int = 6
     ) -> list[Player]:
@@ -139,32 +180,63 @@ class NPCController:
         """Make a single LLM call to gpt-5-mini."""
         try:
             response = await self.client.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-5.4-mini",
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
             return f"(NPC is silent - {type(e).__name__})"
 
+    def _parse_direction(self, response: str) -> tuple[Optional[str], str]:
+        """Parse an optional @PlayerName prefix from an NPC response.
+        Returns (target_name or None, clean_message).
+        """
+        if not response.startswith("@"):
+            return None, response
+        # Split on first whitespace to extract @Name
+        parts = response.split(None, 1)
+        if len(parts) < 2:
+            return None, response
+        candidate = parts[0][1:]  # Remove leading @
+        message = parts[1]
+        # Validate it's an alive player
+        player = self.engine.get_player_by_name(candidate)
+        if player and player.status == PlayerStatus.ALIVE:
+            return candidate, message
+        return None, response
+
     async def generate_discussion_statements(
         self,
         round_number: int,
         exchange_number: int,
-        prior_statements: list[tuple[str, str]],
-    ) -> list[tuple[str, str]]:
-        """Generate discussion statements from a subset of alive NPCs.
-        Returns list of (speaker_name, statement) tuples.
+    ) -> tuple[list[tuple[str, str]], Optional[str]]:
+        """Generate discussion statements sequentially from a subset of alive NPCs.
+
+        NPCs may direct statements at other players using @Name prefix.
+        When directed at another NPC, a response is generated immediately.
+        All messages are registered in the discussion log internally.
+
+        Returns (display_statements, agent_addressed_by) where:
+        - display_statements: list of (display_name, message) for narrative
+        - agent_addressed_by: name of NPC who directed at the agent, or None
         """
         speakers = self._select_speakers(exchange_number)
         alive_names = ", ".join(p.name for p in self.engine.get_alive_players())
         num_alive = len(self.engine.get_alive_players())
+        agent_name = self.engine.get_agent_player().name
 
-        tasks = []
-        speaker_names = []
+        display_statements: list[tuple[str, str]] = []
+        agent_addressed_by: Optional[str] = None
+        # Track NPCs who already spoke via a directed response
+        already_spoke: set[str] = set()
+
         for player in speakers:
+            if player.name in already_spoke:
+                continue
             mem = self.memories.get(player.name)
             if not mem:
                 continue
+
             prompt = NPC_DISCUSSION_PROMPT.format(
                 player_name=mem.player_name,
                 personality=mem.personality,
@@ -174,22 +246,89 @@ class NPCController:
                 alive_players=alive_names,
                 prize_pot=f"{self.engine.prize_pot:,.0f}",
                 game_history=self.engine.get_full_history_text(),
+                round_summaries=self._format_round_summaries(),
                 suspicion_summary=self._format_suspicions(mem),
-                prior_statements=self._format_prior_statements(prior_statements),
+                prior_statements=self._format_prior_statements(
+                    self.engine.current_round.discussion_log
+                ),
                 exchange_number=exchange_number + 1,
                 max_exchanges=self.engine.max_discussion_exchanges,
             )
-            tasks.append(self._llm_call(prompt))
-            speaker_names.append(player.name)
-
-        responses = await asyncio.gather(*tasks)
-        statements = []
-        for name, response in zip(speaker_names, responses):
-            # Clean up response
+            response = await self._llm_call(prompt)
             response = response.strip().strip('"').strip("'")
-            if response:
-                statements.append((name, response))
-        return statements
+            if not response:
+                continue
+
+            # Check for @Direction
+            target_name, clean_message = self._parse_direction(response)
+
+            if target_name and target_name != player.name:
+                target = self.engine.get_player_by_name(target_name)
+                if target and target.status == PlayerStatus.ALIVE:
+                    # Register the directing statement
+                    self.engine.register_discussion_message(player.name, clean_message)
+                    display_statements.append(
+                        (f"{player.name} (to {target_name})", clean_message)
+                    )
+
+                    if target.is_agent:
+                        # NPC directed at agent — note it, agent responds on their turn
+                        agent_addressed_by = player.name
+                    else:
+                        # NPC directed at another NPC — generate immediate response
+                        directed = await self.generate_directed_response(
+                            target_player=target,
+                            speaker_name=player.name,
+                            speaker_message=clean_message,
+                            round_number=round_number,
+                            prior_statements=self.engine.current_round.discussion_log,
+                        )
+                        self.engine.register_discussion_message(target.name, directed)
+                        display_statements.append(
+                            (f"{target.name} (responding to {player.name})", directed)
+                        )
+                        already_spoke.add(target.name)
+                else:
+                    # Invalid target, treat as regular statement
+                    self.engine.register_discussion_message(player.name, response)
+                    display_statements.append((player.name, response))
+            else:
+                # Regular statement (no direction)
+                self.engine.register_discussion_message(player.name, clean_message)
+                display_statements.append((player.name, clean_message))
+
+        return display_statements, agent_addressed_by
+
+    async def generate_directed_response(
+        self,
+        target_player: Player,
+        speaker_name: str,
+        speaker_message: str,
+        round_number: int,
+        prior_statements: list[tuple[str, str]],
+    ) -> str:
+        """Generate a single NPC response when directly addressed by another player."""
+        mem = self.memories.get(target_player.name)
+        if not mem:
+            return "(No response)"
+
+        prompt = NPC_DIRECTED_RESPONSE_PROMPT.format(
+            player_name=mem.player_name,
+            personality=mem.personality,
+            role_knowledge=self._get_role_knowledge(target_player),
+            round_number=round_number,
+            num_alive=len(self.engine.get_alive_players()),
+            alive_players=", ".join(p.name for p in self.engine.get_alive_players()),
+            prize_pot=f"{self.engine.prize_pot:,.0f}",
+            game_history=self.engine.get_full_history_text(),
+            round_summaries=self._format_round_summaries(),
+            suspicion_summary=self._format_suspicions(mem),
+            prior_statements=self._format_prior_statements(prior_statements),
+            speaker_name=speaker_name,
+            speaker_message=speaker_message,
+        )
+        response = await self._llm_call(prompt)
+        return response.strip().strip('"').strip("'")
 
     async def generate_npc_votes(self) -> dict[str, str]:
         """Generate votes from all alive NPCs. Returns {voter_name: target_name}."""
@@ -225,6 +364,7 @@ class NPCController:
                 round_number=self.engine.round_number,
                 alive_players=alive_names,
                 game_history=self.engine.get_full_history_text(),
+                round_summaries=self._format_round_summaries(),
                 discussion_summary=discussion_summary,
                 suspicion_summary=self._format_suspicions(mem),
                 vote_strategy_hint=hint,
@@ -269,8 +409,52 @@ class NPCController:
 
         return votes
 
+    async def generate_traitor_pre_murder_discussion(self) -> list[tuple[str, str]]:
+        """Generate a discussion round among NPC traitors before murder nomination.
+        Returns list of (traitor_name, statement) tuples.
+        """
+        npc_traitors = [
+            p for p in self.engine.get_alive_traitors()
+            if not p.is_agent
+        ]
+        if not npc_traitors:
+            return []
+
+        alive_faithfuls = self.engine.get_alive_faithfuls()
+        faithful_names = ", ".join(p.name for p in alive_faithfuls)
+
+        tasks = []
+        names = []
+        for traitor in npc_traitors:
+            mem = self.memories.get(traitor.name)
+            fellow = [
+                p.name for p in self.engine.get_alive_traitors()
+                if p.name != traitor.name
+            ]
+            prompt = NPC_TRAITOR_PRE_MURDER_DISCUSSION_PROMPT.format(
+                player_name=traitor.name,
+                fellow_traitors=", ".join(fellow),
+                alive_faithfuls=faithful_names,
+                game_history=self.engine.get_full_history_text(),
+                strategic_notes=(
+                    f"Your suspicion data: {self._format_suspicions(mem)}"
+                    if mem else "No data available."
+                ),
+            )
+            tasks.append(self._llm_call(prompt))
+            names.append(traitor.name)
+
+        responses = await asyncio.gather(*tasks)
+        return [
+            (name, resp.strip().strip('"').strip("'"))
+            for name, resp in zip(names, responses)
+            if resp.strip()
+        ]
+
     async def generate_murder_selection(self) -> str:
-        """Traitor NPCs collectively decide whom to murder. Returns target name."""
+        """Traitor NPCs discuss strategy then collectively decide whom to murder.
+        Returns target name.
+        """
         npc_traitors = [
             p for p in self.engine.get_alive_traitors()
             if not p.is_agent
@@ -282,7 +466,13 @@ class NPCController:
             # Agent is the only traitor, shouldn't reach here
             return alive_faithfuls[0].name if alive_faithfuls else ""
 
-        # Each traitor NPC nominates
+        # Step 1: Discussion round among traitors
+        discussion_statements = await self.generate_traitor_pre_murder_discussion()
+        traitor_discussion = "\n".join(
+            f'{name}: "{msg}"' for name, msg in discussion_statements
+        ) if discussion_statements else "(No discussion.)"
+
+        # Step 2: Each traitor nominates informed by discussion
         tasks = []
         for traitor in npc_traitors:
             mem = self.memories.get(traitor.name)
@@ -295,6 +485,7 @@ class NPCController:
                 fellow_traitors=", ".join(fellow),
                 alive_faithfuls=faithful_names,
                 game_history=self.engine.get_full_history_text(),
+                traitor_discussion=traitor_discussion,
                 strategic_notes=(
                     f"Your suspicion data: {self._format_suspicions(mem)}"
                     if mem else "No data available."
@@ -321,19 +512,32 @@ class NPCController:
             # Fallback: random faithful
             return self.rng.choice(sorted(valid_faithful_names))
 
+    def _format_turret_log(self, turret_log: list[tuple[str, str]]) -> str:
+        """Format turret conversation log for inclusion in NPC prompts."""
+        if not turret_log:
+            return "(No discussion yet.)"
+        lines = []
+        for speaker, msg in turret_log:
+            lines.append(f'{speaker}: "{msg}"')
+        return "\n".join(lines)
+
     async def generate_traitor_conclave_statements(
-        self, agent_message: Optional[str] = None
+        self,
+        turret_log: Optional[list[tuple[str, str]]] = None,
     ) -> list[tuple[str, str]]:
-        """Generate traitor conclave discussion. Returns list of (name, message)."""
+        """Generate traitor conclave discussion sequentially.
+
+        Each NPC traitor sees the full turret conversation log (including
+        prior NPC statements and agent messages) when generating their response.
+
+        Returns list of (name, message).
+        """
         npc_traitors = [
             p for p in self.engine.get_alive_traitors()
             if not p.is_agent
         ]
-
-        agent_context = ""
-        if agent_message:
-            agent_name = self.engine.get_agent_player().name
-            agent_context = f'Your fellow Traitor {agent_name} said: "{agent_message}"'
+        if turret_log is None:
+            turret_log = []
 
         alive_names = ", ".join(p.name for p in self.engine.get_alive_players())
         game_state = (
@@ -343,8 +547,7 @@ class NPCController:
             f"{self.engine.get_full_history_text()}"
         )
 
-        tasks = []
-        names = []
+        statements = []
         for traitor in npc_traitors:
             fellow = [
                 p.name for p in self.engine.get_alive_traitors()
@@ -353,18 +556,17 @@ class NPCController:
             prompt = NPC_TRAITOR_DISCUSSION_PROMPT.format(
                 player_name=traitor.name,
                 fellow_traitors=", ".join(fellow),
-                agent_context=agent_context,
+                turret_discussion=self._format_turret_log(turret_log),
                 game_state=game_state,
             )
-            tasks.append(self._llm_call(prompt))
-            names.append(traitor.name)
+            response = await self._llm_call(prompt)
+            response = response.strip().strip('"').strip("'")
+            if response:
+                statements.append((traitor.name, response))
+                # Add to turret_log so next NPC sees this response
+                turret_log.append((traitor.name, response))
 
-        responses = await asyncio.gather(*tasks)
-        return [
-            (name, resp.strip().strip('"').strip("'"))
-            for name, resp in zip(names, responses)
-            if resp.strip()
-        ]
+        return statements
 
     async def generate_endgame_votes(self) -> dict[str, str]:
         """NPC endgame votes. Returns {voter_name: 'end_game' | 'banish_again'}."""
