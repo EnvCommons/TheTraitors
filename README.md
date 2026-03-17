@@ -32,17 +32,7 @@ Each task initialises a fresh 22-player game with deterministic player names, pe
 
 ## Reward Structure
 
-This is a dense, verifiable reward environment. Rewards are computed from game state with no LLM graders.
-
-| Component | Value | Condition |
-|-----------|-------|-----------|
-| Survival bonus | +0.02/round | Awarded each round the agent survives (capped at +0.2) |
-| Correct traitor vote | +0.1/vote | Agent voted for a player who was banished and revealed as Traitor |
-| Wrong faithful vote | -0.03/vote | Agent voted for a player who was banished and revealed as Faithful |
-| Win condition | +0.5 | Agent's side wins AND agent is still alive |
-| Prize pot share | up to +0.2 | Proportional to accumulated prize pot vs maximum possible |
-
-Total reward is clamped to [0, 1].
+Rewards are based on surviving each round, where the agent receives a +2 reward for surviving murder and banishment.
 
 ## Tools
 
