@@ -21,10 +21,6 @@ Each round follows the show's format: a night phase (Traitors secretly murder a 
 
 No sandbox required. The environment runs entirely in-process. NPC decisions use gpt-5-mini API calls.
 
-## License
-
-[ORLv1](https://openreward.ai/orlv1.md).
-
 ## Tasks
 
 There are 100 training tasks and 100 test tasks.
