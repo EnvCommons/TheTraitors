@@ -4,7 +4,7 @@
 
 ## Description
 
-The Traitors is a social deduction environment based on the UK TV show "The Traitors." The agent plays as one of 22 contestants — either a Faithful or a Traitor — in a multi-round game of deception, discussion, and elimination. All 21 other players are NPCs driven by gpt-5-mini with persistent personalities, memories, and suspicion tracking.
+The Traitors is a social deduction environment based on the UK TV show "The Traitors." The agent plays as one of 22 contestants — either a Faithful or a Traitor — in a multi-round game of deception, discussion, and elimination. All 21 other players are NPCs driven by gpt-5.4-mini with persistent personalities, memories, and suspicion tracking.
 
 Each round follows the show's format: a night phase (Traitors secretly murder a Faithful), breakfast (reveal), a team mission, a roundtable discussion, and a banishment vote. The game tests social reasoning, strategic voting, deception (as Traitor), and deduction (as Faithful).
 
@@ -55,7 +55,7 @@ The environment requires strategic social reasoning against 21 LLM-driven NPCs. 
 
 ## Other Environment Requirements
 
-This environment requires an OpenAI API key passed via the `openai_api_key` secret for NPC decision-making (uses gpt-5-mini).
+This environment requires an OpenAI API key passed via the `openai_api_key` secret for NPC decision-making (uses gpt-5.4-mini).
 
 ## Safety
 
