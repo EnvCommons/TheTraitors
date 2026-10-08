@@ -34,6 +34,8 @@ Each task initialises a fresh 22-player game with deterministic player names, pe
 
 Rewards are based on surviving each round, where the agent receives a +2 reward for surviving murder and banishment.
 
+Winning the game (the agent's side wins while the agent is still in the game) pays a further +32. A game lasts at most 16 rounds, so survival rewards never exceed 32, and every win outscores every loss. Survival rewards rank games with the same outcome.
+
 ## Tools
 
 | Tool | Phase | Description |

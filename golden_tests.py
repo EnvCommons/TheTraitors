@@ -1149,14 +1149,47 @@ class TestIntegrationReward:
         reward = env._calculate_reward()
         assert reward == 0.0
 
-    async def test_reward_win_returns_one(self):
+    async def test_reward_win_returns_win_reward(self):
+        from thetraitors import WIN_REWARD
         env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
         # Banish all traitors
         for t in env.engine.get_alive_traitors():
             t.status = PlayerStatus.BANISHED
         env.engine.winner = "faithfuls"
         reward = env._calculate_reward()
-        assert reward == 1.0
+        assert reward == WIN_REWARD
+
+    async def _win_by_final_vote(self):
+        from thetraitors import CastVoteParams
+        env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
+        traitors = env.engine.get_alive_traitors()
+        for t in traitors[:-1]:
+            t.status = PlayerStatus.BANISHED
+        last = traitors[-1].name
+        _setup_mock_llm(mock_client, last)
+        env.engine.phase = GamePhase.ROUNDTABLE_VOTE
+        result = await env.cast_vote(CastVoteParams(player_name=last))
+        assert result.finished
+        assert env.engine.winner == "faithfuls"
+        return env, result
+
+    async def test_win_outscores_longest_possible_loss(self):
+        from game_engine import TraitorsGameEngine
+        env, result = await self._win_by_final_vote()
+        # A losing game pays at most one survival reward for the murder and one
+        # for the vote in each of at most MAX_ROUNDS + 1 rounds.
+        max_losing_total = 2.0 * (TraitorsGameEngine.MAX_ROUNDS + 1)
+        assert result.reward > max_losing_total
+
+    async def test_calls_after_game_over_pay_nothing(self):
+        from thetraitors import SpeakParams, CastVoteParams
+        env, result = await self._win_by_final_vote()
+        again = await env.speak(SpeakParams(message="hello"))
+        assert again.finished
+        assert again.reward == 0.0
+        alive = [p.name for p in env.engine.get_alive_players() if not p.is_agent]
+        again = await env.cast_vote(CastVoteParams(player_name=alive[0]))
+        assert again.reward == 0.0
 
     async def test_reward_loss_returns_zero(self):
         env, mock_client = _make_mock_env(seed=42, agent_role="faithful", agent_idx=0)
