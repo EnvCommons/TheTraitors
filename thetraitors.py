@@ -16,6 +16,11 @@ from npc import NPCController
 from names import generate_player_setup
 from prompts import AGENT_PROMPT_FAITHFUL, AGENT_PROMPT_TRAITOR
 
+# Each round pays at most +1 for surviving the murder and +1 for surviving the
+# vote, and a game lasts at most MAX_ROUNDS + 1 rounds. A win is worth more than
+# the most survival reward any game can pay, so every win outscores every loss.
+WIN_REWARD = 2.0 * (TraitorsGameEngine.MAX_ROUNDS + 1)
+
 
 class TaskSpec(BaseModel):
     id: str
@@ -297,14 +302,14 @@ class TraitorsEnvironment(Environment):
         return "\n\n".join(parts)
 
     def _calculate_reward(self) -> float:
-        """Calculate final game-end reward. Returns 1.0 for a win, 0.0 otherwise."""
+        """Calculate final game-end reward. Returns WIN_REWARD for a win, 0.0 otherwise."""
         agent = self.engine.get_agent_player()
         if self.engine.winner:
             agent_side = (
                 "faithfuls" if agent.role == PlayerRole.FAITHFUL else "traitors"
             )
             if self.engine.winner == agent_side and agent.status == PlayerStatus.ALIVE:
-                return 1.0
+                return WIN_REWARD
         return 0.0
 
     def _consume_pending_reward(self) -> float:
@@ -314,11 +319,11 @@ class TraitorsEnvironment(Environment):
         return pending
 
     def _game_over_output(self) -> ToolOutput:
-        final_reward = self._calculate_reward() + self._consume_pending_reward()
+        # The game-end reward was paid by the call that ended the game.
         return ToolOutput(
             blocks=[TextBlock(text="The game is already over.")],
-            metadata={"error": "game_finished", "final_reward": final_reward},
-            reward=final_reward,
+            metadata={"error": "game_finished"},
+            reward=0.0,
             finished=True,
         )
 
