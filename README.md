@@ -4,7 +4,7 @@
 
 ## Description
 
-The Traitors is a social deduction environment based on the UK TV show "The Traitors." The agent plays as one of 22 contestants — either a Faithful or a Traitor — in a multi-round game of deception, discussion, and elimination. All 21 other players are NPCs driven by gpt-5.4-mini with persistent personalities, memories, and suspicion tracking.
+The Traitors is a social deduction environment based on the UK TV show "The Traitors." The agent plays as one of 22 contestants (either a Faithful or a Traitor) in a multi-round game of deception, discussion, and elimination. All 21 other players are NPCs driven by gpt-5.4-mini with persistent personalities, memories, and suspicion tracking.
 
 Each round follows the show's format: a night phase (Traitors secretly murder a Faithful), breakfast (reveal), a team mission, a roundtable discussion, and a banishment vote. The game tests social reasoning, strategic voting, deception (as Traitor), and deduction (as Faithful).
 
@@ -19,22 +19,32 @@ Each round follows the show's format: a night phase (Traitors secretly murder a 
 
 ## Compute Requirements
 
-No sandbox required. The environment runs entirely in-process. NPC decisions use gpt-5-mini API calls.
+No sandbox required. The environment runs entirely in-process. NPC decisions use gpt-5.4-mini API calls.
+
+## License
+
+[MIT](https://opensource.org/licenses/MIT).
 
 ## Tasks
 
-There are 100 training tasks and 100 test tasks.
+There are 100 tasks in the `train` split and 100 in `test`.
 
 - **Train split** (seeds 0-99): 50 tasks as Faithful, 50 as Traitor
 - **Test split** (seeds 10000-10099): 50 tasks as Faithful, 50 as Traitor
 
-Each task initialises a fresh 22-player game with deterministic player names, personalities, and role assignments based on the seed. Games last up to 15 rounds, typically ending in 8-12 rounds as players are eliminated.
+Each task initialises a fresh 22-player game (3 Traitors) with deterministic player names, personalities, and role assignments based on the seed. If no side has won by the end of round 15, the Traitors win if any remain.
 
 ## Reward Structure
 
-Rewards are based on surviving each round, where the agent receives a +2 reward for surviving murder and banishment.
+Rewards are based on surviving each round: the agent receives +1 for surviving the murder and +1 for surviving the banishment vote.
 
 Winning the game (the agent's side wins while the agent is still in the game) pays a further +32. A game lasts at most 16 rounds, so survival rewards never exceed 32, and every win outscores every loss. Survival rewards rank games with the same outcome.
+
+No LLM grader is used: rewards come from the game state. The NPCs are LLM-driven, so outcomes depend on gpt-5.4-mini's play.
+
+## Data
+
+No external data files are used. Player names, personalities and roles are generated in code from each task's seed.
 
 ## Tools
 
@@ -49,7 +59,7 @@ Winning the game (the agent's side wins while the agent is still in the game) pa
 
 ## Time Horizon
 
-Games last 8-15 rounds. Each round involves multiple tool calls (discussion exchanges + vote). A typical game involves 30-60 agent tool calls.
+The Traitors is a multi-turn environment. Each round involves multiple tool calls (discussion exchanges and a vote), and the episode ends when the game ends or the agent is eliminated.
 
 ## Environment Difficulty
 
@@ -71,6 +81,6 @@ Agents interact with a simulated social deduction game. The environment does not
   title     = {The Traitors},
   year      = {2026},
   publisher = {OpenReward},
-  url       = {https://openreward.ai/EnvCommons/thetraitors}
+  url       = {https://openreward.ai/RJT1990/TheTraitors}
 }
 ```
